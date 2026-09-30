@@ -72,8 +72,10 @@ bool ensureDir(const std::string& path, mode_t mode) {
 
 void tryUnshareMountNs() {
     if (unshare(CLONE_NEWNS) != 0) {
-        PLOG(WARNING) << "unshare(CLONE_NEWNS) failed, using host mount namespace";
-        return;
+        // Never run container setup in the host mount namespace: the bind mounts and
+        // MNT_DETACH teardown below would land on the real /dev, /proc, /sys.
+        PLOG(ERROR) << "unshare(CLONE_NEWNS) failed; refusing to run in host mount namespace";
+        _exit(126);
     }
     // A freshly unshared mount namespace inherits MS_SHARED propagation on most mounts.
     // Without flipping the root to MS_SLAVE (same trick zygote / init's SetUpMountNamespace
@@ -83,7 +85,12 @@ void tryUnshareMountNs() {
     // new devpts instance each time, which bogs down the whole VM and eventually makes
     // setupBindMounts() fail for all subsequent commands.
     if (mount("rootfs", "/", nullptr, MS_SLAVE | MS_REC, nullptr) != 0) {
-        PLOG(WARNING) << "make-rslave / failed; child mounts may leak to host namespace";
+        // Observed on an enforcing Pixel 6 when sepolicy lacked `allow aohp_container_daemon
+        // rootfs:dir mounton`: every exec leaked its binds to the host (21k mounts) and the
+        // detach on teardown unmounted the host's /sys/fs/selinux, crashing Settings and the
+        // AgentDriver. A leaking namespace is worse than a failed exec.
+        PLOG(ERROR) << "make-rslave / failed; refusing to run with shared mount propagation";
+        _exit(126);
     }
 }
 
