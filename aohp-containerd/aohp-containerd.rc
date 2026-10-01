@@ -12,7 +12,9 @@ service aohp-containerd /system/bin/aohp-containerd
     class main
     user root
     group root system sdcard_rw media_rw everybody
-    capabilities SYS_CHROOT SYS_ADMIN SYS_PTRACE SETUID SETGID DAC_OVERRIDE KILL FOWNER
+    # CHOWN/FSETID: package managers chown files (dpkg-statoverride, useradd); NET_ADMIN/NET_RAW:
+    # container-side networking (WireGuard/VPN, routes, firewall marks).
+    capabilities SYS_CHROOT SYS_ADMIN SYS_PTRACE SETUID SETGID DAC_OVERRIDE KILL FOWNER CHOWN FSETID NET_ADMIN NET_RAW
     socket aohp_container stream 0660 system system
     seclabel u:r:aohp_container_daemon:s0
     writepid /dev/cpuset/system-background/tasks
