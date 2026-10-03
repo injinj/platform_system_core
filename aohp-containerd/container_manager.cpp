@@ -529,7 +529,21 @@ bool ContainerManager::setupBindMounts(const std::string& rootfs) {
         return true;
     };
 
-    if (!doMount("/proc", "/proc", 0)) return false;
+    // Android mounts the host /proc with hidepid=invisible,gid=readproc: a bind of it hides
+    // every pid the container is not in group readproc for (ls /proc shows ~10 entries,
+    // /proc/<pid>/stat is ENOENT), so ps/pidof/pgrep and pid-liveness checks inside the
+    // container cannot see host processes. Mount a fresh procfs instance (own superblock
+    // since Linux 5.8, so its options are independent of the host mount) without hidepid;
+    // SELinux still governs which /proc/<pid> entries are readable. Fall back to the bind
+    // if the kernel or policy refuses.
+    {
+        std::string target = rootfs + "/proc";
+        if (!ensureDir(target, 0555)) return false;
+        if (mount("proc", target.c_str(), "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, nullptr) != 0) {
+            PLOG(WARNING) << "fresh procfs mount failed; falling back to bind of host /proc";
+            if (!doMount("/proc", "/proc", 0)) return false;
+        }
+    }
     if (!doMount("/dev", "/dev", 0)) return false;
     if (!doMount("/sys", "/sys", MS_RDONLY)) return false;
 
