@@ -834,6 +834,9 @@ long ContainerManager::startService(const std::string& name, const std::string& 
         }
         if (pid2 == 0) {
             close(syncPipe[1]);
+            // Own process group (pgid == recorded pid) so stopService can signal the whole
+            // tree: "sh -c" and everything it spawns (e.g. the node gateway) stays in it.
+            setpgid(0, 0);
             tryUnshareMountNs();
             if (!setupBindMounts(rootfs)) {
                 _exit(125);
@@ -903,10 +906,19 @@ bool ContainerManager::stopService(const std::string& name, const std::string& s
     }
     pid_t p = static_cast<pid_t>(strtol(line.c_str(), nullptr, 10));
     if (p <= 1) return false;
-    kill(p, SIGTERM);
+    // Signal the service's process group (startService puts the child in its own), not
+    // just the "sh -c" wrapper: killing only the wrapper orphaned the real server (node
+    // gateway) which kept its port, so Stop/Restart never freed it. Fall back to the pid
+    // alone if no such group exists (service started by an older daemon).
+    auto signalService = [p](int sig) -> int {
+        if (kill(-p, sig) == 0) return 0;
+        return kill(p, sig);
+    };
+    signalService(SIGTERM);
     usleep(500000);
-    if (kill(p, 0) == 0) {
-        kill(p, SIGKILL);
+    if (signalService(0) == 0) {
+        usleep(1500000);
+        if (signalService(0) == 0) signalService(SIGKILL);
     }
     unlink(pidPath.c_str());
     return true;
