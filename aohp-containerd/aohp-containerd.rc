@@ -11,7 +11,9 @@ on post-fs-data
 service aohp-containerd /system/bin/aohp-containerd
     class main
     user root
-    group root system sdcard_rw media_rw everybody
+    # readproc: hidepid=invisible on the host /proc hides other users' pids from anyone not
+    # in this group; container processes inherit it so ps/pidof see host pids.
+    group root system sdcard_rw media_rw everybody readproc
     # CHOWN/FSETID: package managers chown files (dpkg-statoverride, useradd); NET_ADMIN/NET_RAW:
     # container-side networking (WireGuard/VPN, routes, firewall marks).
     capabilities SYS_CHROOT SYS_ADMIN SYS_PTRACE SETUID SETGID DAC_OVERRIDE KILL FOWNER CHOWN FSETID NET_ADMIN NET_RAW
