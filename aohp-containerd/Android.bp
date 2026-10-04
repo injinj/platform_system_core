@@ -1,0 +1,34 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+cc_binary {
+    name: "aohp-containerd",
+    srcs: [
+        "main.cpp",
+        "container_manager.cpp",
+        "cgroup_controller.cpp",
+        "session.cpp",
+        "tar_gz_extract.cpp",
+    ],
+    shared_libs: [
+        "libcutils",
+        "liblog",
+        "libutils",
+        "libbase",
+        "libz",
+    ],
+    init_rc: ["aohp-containerd.rc"],
+    cflags: [
+        "-Wall",
+        "-Werror",
+        "-Wno-unused-parameter",
+    ],
+}
+
+prebuilt_etc {
+    name: "aohp_cgroup_conf",
+    src: "cgroup.conf",
+    sub_dir: "aohp",
+    filename: "cgroup.conf",
+}

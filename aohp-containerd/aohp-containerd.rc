@@ -1,0 +1,18 @@
+# Ensure base paths exist with correct labels before the daemon starts.
+on post-fs-data
+    mkdir /data/aohp 0770 root system
+    mkdir /data/aohp/envs 0770 root system
+    mkdir /data/aohp/shared 0770 root system
+    mkdir /data/aohp/shared/npm-cache 0770 root system
+    mkdir /data/aohp/shared/openclaw-dev 0770 root system
+    mkdir /data/aohp/shared/uda 0770 root system
+    restorecon_recursive /data/aohp
+
+service aohp-containerd /system/bin/aohp-containerd
+    class main
+    user root
+    group root system sdcard_rw media_rw everybody
+    capabilities SYS_CHROOT SYS_ADMIN SYS_PTRACE SETUID SETGID DAC_OVERRIDE KILL FOWNER
+    socket aohp_container stream 0660 system system
+    seclabel u:r:aohp_container_daemon:s0
+    writepid /dev/cpuset/system-background/tasks
