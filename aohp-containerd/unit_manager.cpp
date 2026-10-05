@@ -1129,7 +1129,7 @@ std::string UnitManager::unitJson(const UnitState& u, time_t now) {
     o << ",\"remainAfterExit\":" << (d.remainAfterExit ? "true" : "false");
     o << ",\"workingDirectory\":\"" << jsonEscapeStr(d.workingDirectory) << "\"";
     o << ",\"after\":" << jsonStringArray(d.after) << ",\"before\":" << jsonStringArray(d.before);
-    o << ",\"requiresUnits\":" << jsonStringArray(d.requiresUnits) << ",\"wants\":" << jsonStringArray(d.wants);
+    o << ",\"requires\":" << jsonStringArray(d.requiresUnits) << ",\"wants\":" << jsonStringArray(d.wants);
     std::vector<std::string> conds;
     for (const auto& c : d.conditionPathExists) conds.push_back((c.second ? "!" : "") + c.first);
     o << ",\"conditionPathExists\":" << jsonStringArray(conds);
