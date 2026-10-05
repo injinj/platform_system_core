@@ -60,7 +60,7 @@ struct EnvUnits {
 
 /**
  * systemd-subset unit supervisor for container envs (see aohp-driver docs/UNITS.md).
- * Unit files: <rootfs>/etc/aohp/system/*.service|*.timer; enabled = symlink in
+ * Unit files: <rootfs>/etc/aohp/system/NAME.service and NAME.timer; enabled = symlink in
  * <rootfs>/etc/aohp/system/aohp.target.wants/. State is rebuilt from the files at every
  * daemon start / daemon-reload; nothing but Persistent= timer stamps is written to disk.
  */
