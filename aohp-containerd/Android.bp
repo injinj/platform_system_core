@@ -10,6 +10,8 @@ cc_binary {
         "cgroup_controller.cpp",
         "session.cpp",
         "tar_gz_extract.cpp",
+        "unit_file.cpp",
+        "unit_manager.cpp",
     ],
     shared_libs: [
         "libcutils",

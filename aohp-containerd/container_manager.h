@@ -8,6 +8,7 @@
 #pragma once
 
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -15,6 +16,17 @@
 #include "cgroup_controller.h"
 
 namespace aohp {
+
+class UnitManager;
+
+/** What to run inside a container for a unit (see unit_manager.h). */
+struct SpawnSpec {
+    std::vector<std::string> argv;   // e.g. {"/bin/sh", "-c", cmd}
+    std::vector<std::string> env;    // complete KEY=VALUE environment (replaces the daemon's)
+    std::string workDir = "/";       // path inside the rootfs
+    bool workDirOptional = true;     // fall back to / when missing
+    std::string logPath;             // host path; stdout+stderr appended (empty = /dev/null)
+};
 
 struct ExecResult {
     int exitCode;
@@ -25,6 +37,7 @@ struct ExecResult {
 class ContainerManager {
 public:
     ContainerManager();
+    ~ContainerManager();
 
     std::vector<std::string> listContainers();
     bool createContainer(const std::string& name, const std::string& templateName);
@@ -35,6 +48,16 @@ public:
     int openShell(const std::string& name);
 
     const std::string& getLastError() const { return mLastError_; }
+
+    /**
+     * Fork one process into the container: own session + process group (pgid == pid), fresh
+     * mount namespace with the standard binds, env cgroup, chroot, chdir(workDir), stdout/stderr
+     * to logPath, daemon fds closed, execve(argv, env). The caller owns waitpid().
+     * Returns the pid or -1 (error text in *err). No --jitless injection.
+     */
+    pid_t spawnInContainer(const std::string& name, const SpawnSpec& spec, std::string* err);
+
+    UnitManager& units() { return *mUnits_; }
 
     std::string templateInfo(const std::string& name);
 
@@ -56,6 +79,7 @@ private:
     std::map<std::string, std::string> mWorkDir_;
 
     CgroupController mCgroup_;
+    std::unique_ptr<UnitManager> mUnits_;
 
     std::string rootfsPath(const std::string& name);
     std::string envPath(const std::string& name);

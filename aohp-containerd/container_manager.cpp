@@ -10,6 +10,7 @@
 #include "container_manager.h"
 #include "protocol.h"
 #include "tar_gz_extract.h"
+#include "unit_manager.h"
 
 #include <cerrno>
 #include <cstdlib>
@@ -40,7 +41,6 @@ namespace aohp {
 
 namespace {
 
-constexpr int64_t kLogRotateBytes = 10 * 1024 * 1024;
 
 bool mkdirParentsAbsolute(const std::string& path, mode_t mode) {
     if (path.empty() || path[0] != '/') return false;
@@ -182,7 +182,10 @@ ContainerManager::ContainerManager() {
     mkdir(SHARED_OPENCLAW_DEV, 0770);
     mkdir(SHARED_UDA, 0770);
     mCgroup_.loadConfig(AOHP_CGROUP_CONF);
+    mUnits_.reset(new UnitManager(*this));
 }
+
+ContainerManager::~ContainerManager() {}
 
 std::string ContainerManager::envPath(const std::string& name) {
     return std::string(CONTAINER_BASE_DIR) + "/" + name;
@@ -322,6 +325,8 @@ bool ContainerManager::createContainer(const std::string& name, const std::strin
     if (!mCgroup_.createForContainer(name)) {
         LOG(WARNING) << "cgroup create failed for " << name << " (continuing without limits)";
     }
+    mUnits_->forgetEnv(name);
+    mUnits_->writeEnvName(name);
 
     LOG(INFO) << "Container " << name << " created from template " << templateName;
     return true;
@@ -432,6 +437,7 @@ bool ContainerManager::teardownBindMounts(const std::string& rootfs) {
 
 bool ContainerManager::destroyContainer(const std::string& name) {
     mLastError_.clear();
+    mUnits_->forgetEnv(name);
     {
         std::lock_guard<std::mutex> lock(mWorkDirMutex_);
         mWorkDir_.erase(name);
@@ -466,6 +472,7 @@ bool ContainerManager::destroyContainer(const std::string& name) {
 }
 
 bool ContainerManager::resetContainer(const std::string& name) {
+    mUnits_->forgetEnv(name);
     {
         std::lock_guard<std::mutex> lock(mWorkDirMutex_);
         mWorkDir_.erase(name);
@@ -520,6 +527,7 @@ bool ContainerManager::resetContainer(const std::string& name) {
 
     mCgroup_.destroyForContainer(name);
     mCgroup_.createForContainer(name);
+    mUnits_->writeEnvName(name);
 
     LOG(INFO) << "Container " << name << " reset";
     return true;
@@ -808,117 +816,20 @@ long ContainerManager::startService(const std::string& name, const std::string& 
         mLastError_ = "invalid serviceId";
         return -1;
     }
-    std::string rootfs = rootfsPath(name);
-    struct stat st;
-    if (stat(rootfs.c_str(), &st) != 0) {
-        mLastError_ = "Container not found";
-        return -1;
+    // Units (unit_manager.h): <serviceId>.service from /etc/aohp/system when it exists, else a
+    // transient unit — supervised, same list/log as the rest.
+    {
+        std::string err;
+        long pid = mUnits_->legacyStartService(name, serviceId, command, &err);
+        if (pid < 0) mLastError_ = err;
+        return pid;
     }
-
-    std::string sdir = servicesDirPath(name);
-    if (!ensureDir(sdir, 0755)) {
-        mLastError_ = "mkdir services failed";
-        return -1;
-    }
-
-    std::string pidPath = sdir + "/" + serviceId + ".pid";
-    std::string logPath = sdir + "/" + serviceId + ".log";
-    std::string metaPath = sdir + "/" + serviceId + ".meta";
-
-    if (stat(logPath.c_str(), &st) == 0 && st.st_size > kLogRotateBytes) {
-        truncate(logPath.c_str(), 0);
-    }
-
-    int syncPipe[2];
-    if (pipe(syncPipe) != 0) {
-        mLastError_ = "pipe failed";
-        return -1;
-    }
-
-    pid_t pid1 = fork();
-    if (pid1 < 0) {
-        close(syncPipe[0]);
-        close(syncPipe[1]);
-        mLastError_ = "fork failed";
-        return -1;
-    }
-
-    if (pid1 == 0) {
-        close(syncPipe[0]);
-        if (setsid() < 0) {
-            PLOG(ERROR) << "setsid";
-            _exit(1);
-        }
-        pid_t pid2 = fork();
-        if (pid2 < 0) {
-            _exit(1);
-        }
-        if (pid2 == 0) {
-            close(syncPipe[1]);
-            // Own process group (pgid == recorded pid) so stopService can signal the whole
-            // tree: "sh -c" and everything it spawns (e.g. the node gateway) stays in it.
-            setpgid(0, 0);
-            tryUnshareMountNs();
-            if (!setupBindMounts(rootfs)) {
-                _exit(125);
-            }
-            mCgroup_.joinContainerCgroup(name, getpid());
-            int logfd = open(logPath.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
-            if (logfd >= 0) {
-                dup2(logfd, STDOUT_FILENO);
-                dup2(logfd, STDERR_FILENO);
-                if (logfd > STDERR_FILENO) close(logfd);
-            }
-            if (chroot(rootfs.c_str()) != 0) {
-                _exit(126);
-            }
-            chdir("/");
-            setContainerChildCommonEnv();
-            const char* argv[] = {"/bin/sh", "-c", command.c_str(), nullptr};
-            execvp(argv[0], const_cast<char* const*>(argv));
-            _exit(127);
-        }
-
-        std::string pidStr = std::to_string(static_cast<int>(pid2));
-        int pfd = open(pidPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (pfd >= 0) {
-            write(pfd, pidStr.c_str(), pidStr.size());
-            write(pfd, "\n", 1);
-            close(pfd);
-        }
-        long long t = static_cast<long long>(time(nullptr));
-        std::string meta = std::string("{\"serviceId\":\"") + jsonEscape(serviceId) +
-                           "\",\"pid\":" + pidStr + ",\"startTime\":" + std::to_string(t) +
-                           ",\"command\":\"" + jsonEscape(command) + "\"}";
-        int mfd = open(metaPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (mfd >= 0) {
-            write(mfd, meta.c_str(), meta.size());
-            write(mfd, "\n", 1);
-            close(mfd);
-        }
-        char one = 1;
-        write(syncPipe[1], &one, 1);
-        close(syncPipe[1]);
-        _exit(0);
-    }
-
-    close(syncPipe[1]);
-    char buf[1];
-    read(syncPipe[0], buf, sizeof(buf));
-    close(syncPipe[0]);
-    waitpid(pid1, nullptr, 0);
-
-    std::ifstream pin(pidPath.c_str());
-    std::string line;
-    long outPid = -1;
-    if (std::getline(pin, line)) {
-        outPid = strtol(line.c_str(), nullptr, 10);
-    }
-    return outPid;
 }
 
 bool ContainerManager::stopService(const std::string& name, const std::string& serviceId) {
     if (!isValidServiceId(serviceId)) return false;
+    if (mUnits_->legacyStopService(name, serviceId)) return true;
+    // fall through: a service started by a pre-units daemon (pid file) may still be around
     std::string pidPath = servicesDirPath(name) + "/" + serviceId + ".pid";
     std::ifstream in(pidPath.c_str());
     std::string line;
@@ -946,7 +857,11 @@ bool ContainerManager::stopService(const std::string& name, const std::string& s
 }
 
 std::string ContainerManager::listServicesJson(const std::string& name) {
-    std::string sdir = servicesDirPath(name);
+    return mUnits_->legacyListJson(name);
+}
+
+// Pre-units listing (pid/meta files under env/services); kept for reference, unused.
+[[maybe_unused]] static std::string legacyListServicesJsonFromFiles(const std::string& sdir) {
     DIR* d = opendir(sdir.c_str());
     if (!d) {
         return "[]";
@@ -994,6 +909,11 @@ std::string ContainerManager::serviceLogTail(const std::string& name, const std:
                                                int tailBytes) {
     if (!isValidServiceId(serviceId)) return "";
     if (tailBytes <= 0 || tailBytes > 4 * 1024 * 1024) tailBytes = 65536;
+    {
+        std::string unitLog = mUnits_->logTail(name, serviceId, tailBytes);
+        struct stat ust;
+        if (!unitLog.empty() || stat(UnitManager::unitLogPath(envPath(name), serviceId).c_str(), &ust) == 0) return unitLog;
+    }
     std::string path = servicesDirPath(name) + "/" + serviceId + ".log";
     int fd = open(path.c_str(), O_RDONLY);
     if (fd < 0) return "";
@@ -1066,6 +986,122 @@ void ContainerManager::adoptOrphanServicePids() {
         }
         closedir(d);
     }
+}
+
+pid_t ContainerManager::spawnInContainer(const std::string& name, const SpawnSpec& spec, std::string* err) {
+    std::string rootfs = rootfsPath(name);
+    struct stat st;
+    if (stat(rootfs.c_str(), &st) != 0) {
+        if (err) *err = "Container not found: " + name;
+        return -1;
+    }
+    if (spec.argv.empty()) {
+        if (err) *err = "empty argv";
+        return -1;
+    }
+    int logfd = -1;
+    if (!spec.logPath.empty()) {
+        logfd = open(spec.logPath.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+        if (logfd < 0) PLOG(WARNING) << "unit log open " << spec.logPath;
+    }
+    if (logfd < 0) logfd = open("/dev/null", O_WRONLY | O_CLOEXEC);
+
+    // Build argv/envp before fork: no malloc in the child beyond what the mount setup already does.
+    std::vector<char*> argv, envp;
+    for (const auto& a : spec.argv) argv.push_back(const_cast<char*>(a.c_str()));
+    argv.push_back(nullptr);
+    for (const auto& e : spec.env) envp.push_back(const_cast<char*>(e.c_str()));
+    envp.push_back(nullptr);
+
+    int syncPipe[2];
+    if (pipe2(syncPipe, O_CLOEXEC) != 0) {
+        if (err) *err = "pipe failed";
+        if (logfd >= 0) close(logfd);
+        return -1;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        if (err) *err = std::string("fork: ") + strerror(errno);
+        close(syncPipe[0]);
+        close(syncPipe[1]);
+        if (logfd >= 0) close(logfd);
+        return -1;
+    }
+    if (pid == 0) {
+        close(syncPipe[0]);
+        setsid();
+        setpgid(0, 0);
+        // stdout/stderr -> log, stdin -> /dev/null
+        int devnull = open("/dev/null", O_RDONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDIN_FILENO);
+            if (devnull > STDERR_FILENO) close(devnull);
+        }
+        if (logfd >= 0) {
+            dup2(logfd, STDOUT_FILENO);
+            dup2(logfd, STDERR_FILENO);
+        }
+        // close everything else the daemon had open (control socket, client sockets, ptys);
+        // O_CLOEXEC fds go away at exec anyway, this catches the rest.
+        {
+            DIR* fds = opendir("/proc/self/fd");
+            if (fds) {
+                int dfd = dirfd(fds);
+                struct dirent* fe;
+                while ((fe = readdir(fds)) != nullptr) {
+                    int fd = atoi(fe->d_name);
+                    if (fd > STDERR_FILENO && fd != dfd && fd != syncPipe[1]) close(fd);
+                }
+                closedir(fds);
+            }
+        }
+        tryUnshareMountNs();
+        if (!setupBindMounts(rootfs)) {
+            const char m = 125;
+            write(syncPipe[1], &m, 1);
+            _exit(125);
+        }
+        mCgroup_.joinContainerCgroup(name, getpid());
+        if (chroot(rootfs.c_str()) != 0) {
+            const char m = 126;
+            write(syncPipe[1], &m, 1);
+            _exit(126);
+        }
+        if (chdir(spec.workDir.c_str()) != 0) {
+            if (!spec.workDirOptional) {
+                const char m = 124;
+                write(syncPipe[1], &m, 1);
+                _exit(124);
+            }
+            chdir("/");
+        }
+        umask(022);
+        execve(argv[0], argv.data(), envp.data());
+        const char m = 127;
+        write(syncPipe[1], &m, 1);
+        _exit(127);
+    }
+    close(syncPipe[1]);
+    if (logfd >= 0) close(logfd);
+    // The pipe closes at exec (O_CLOEXEC) -> read returns 0 on success, or a failure code byte.
+    char code = 0;
+    ssize_t n = read(syncPipe[0], &code, 1);
+    close(syncPipe[0]);
+    if (n == 1) {
+        int status = 0;
+        waitpid(pid, &status, 0);
+        if (err) {
+            switch (code) {
+                case 124: *err = "WorkingDirectory " + spec.workDir + " missing"; break;
+                case 125: *err = "setupBindMounts failed"; break;
+                case 126: *err = "chroot failed"; break;
+                default: *err = "exec " + spec.argv[0] + " failed"; break;
+            }
+        }
+        return -1;
+    }
+    return pid;
 }
 
 }  // namespace aohp

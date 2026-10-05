@@ -10,6 +10,8 @@
 #include "container_manager.h"
 #include "protocol.h"
 #include "session.h"
+#include "unit_file.h"
+#include "unit_manager.h"
 
 #include <cerrno>
 #include <cstdlib>
@@ -27,7 +29,9 @@
 
 using namespace aohp;
 
-static ContainerManager gMgr;
+// Constructed in main() after the --client check so the debug client does not initialise cgroups/logging.
+static ContainerManager* gMgrPtr = nullptr;
+#define gMgr (*gMgrPtr)
 
 static std::string toJson(const ExecResult& r) {
     auto escape = [](const std::string& s) -> std::string {
@@ -206,6 +210,19 @@ static void handleClient(int clientFd) {
             std::string js = gMgr.diagnose(tokens[1]);
             response = std::string(RESP_OK) + " " + js + "\n";
 
+        } else if (cmd == CMD_UNIT && tokens.size() >= 3) {
+            // UNIT <env> <op> [<base64 json args>]  ->  OK <json> | ERR <message>
+            std::string args = tokens.size() >= 4 ? base64Decode(tokens[3]) : "{}";
+            std::string out, err;
+            if (gMgr.units().op(tokens[1], tokens[2], args, &out, &err)) {
+                response = std::string(RESP_OK) + " " + out + "\n";
+            } else {
+                for (char& c : err) {
+                    if (c == '\n' || c == '\r') c = ' ';
+                }
+                response = std::string(RESP_ERR) + " " + err + "\n";
+            }
+
         } else {
             response = std::string(RESP_ERR) + " unknown command\n";
         }
@@ -217,9 +234,61 @@ static void handleClient(int clientFd) {
     close(clientFd);
 }
 
+// Debug client: aohp-containerd --client '<LINE>' [--socket PATH]
+// Sends one protocol line to the daemon socket and prints the single-line response (root only:
+// the init socket is 0660 system). Lets the UNIT ops be exercised without the framework.
+static int runClient(const std::string& line, const std::string& sockPath) {
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) {
+        perror("socket");
+        return 2;
+    }
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, sockPath.c_str(), sizeof(addr.sun_path) - 1);
+    if (connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
+        perror(("connect " + sockPath).c_str());
+        close(fd);
+        return 2;
+    }
+    std::string msg = line + "\n";
+    if (write(fd, msg.c_str(), msg.size()) != static_cast<ssize_t>(msg.size())) {
+        perror("write");
+        close(fd);
+        return 2;
+    }
+    std::string resp;
+    char buf[65536];
+    ssize_t n;
+    while ((n = read(fd, buf, sizeof(buf))) > 0) {
+        resp.append(buf, n);
+        if (resp.find('\n') != std::string::npos) break;
+    }
+    close(fd);
+    fputs(resp.c_str(), stdout);
+    if (resp.empty() || resp.back() != '\n') fputs("\n", stdout);
+    return resp.compare(0, 2, "OK") == 0 ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
+    std::string clientLine, sockPath = "/dev/socket/aohp_container", bindPath;
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--client" && i + 1 < argc) clientLine = argv[++i];
+        else if (a == "--socket" && i + 1 < argc) sockPath = argv[++i];
+        else if (a == "--bind" && i + 1 < argc) bindPath = argv[++i];
+        else if (a == "--help" || a == "-h") {
+            fputs("usage: aohp-containerd [--bind PATH]            (daemon; init passes the socket)\n"
+                  "       aohp-containerd --client LINE [--socket PATH]\n", stdout);
+            return 0;
+        }
+    }
+    if (!clientLine.empty()) return runClient(clientLine, sockPath);
+
     android::base::InitLogging(argv, android::base::LogdLogger(android::base::SYSTEM));
     LOG(INFO) << "aohp-containerd starting";
+    gMgrPtr = new ContainerManager();
 
     mkdir("/data/aohp", 0770);
     mkdir(CONTAINER_BASE_DIR, 0770);
@@ -229,7 +298,24 @@ int main(int argc, char** argv) {
 
     gMgr.adoptOrphanServicePids();
 
+    gMgr.units().start();
+
     int serverFd = android_get_control_socket("aohp_container");
+    if (serverFd < 0 && !bindPath.empty()) {
+        // Test/debug deployment without init: bind a plain unix socket ourselves.
+        serverFd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        struct sockaddr_un addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+        strncpy(addr.sun_path, bindPath.c_str(), sizeof(addr.sun_path) - 1);
+        unlink(bindPath.c_str());
+        if (serverFd < 0 || bind(serverFd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
+            PLOG(FATAL) << "bind " << bindPath;
+            return 1;
+        }
+        chmod(bindPath.c_str(), 0660);
+        LOG(INFO) << "listening on " << bindPath << " (--bind)";
+    }
     if (serverFd < 0) {
         PLOG(FATAL) << "Failed to get control socket 'aohp_container'";
         return 1;
