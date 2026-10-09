@@ -28,6 +28,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+extern char** environ;
 
 #include <android-base/logging.h>
 
@@ -349,12 +350,18 @@ std::vector<std::string> UnitManager::buildEnv(EnvUnits& e, const UnitState& u, 
     std::map<std::string, std::string> env;
     std::string rootfs = envDir(e.env) + "/rootfs";
     if (u.def.hostExec) {
-        // Android host process: the env's rootfs is not mounted at /, so point the helper at it.
+        // Android host process: start from the daemon's own environment (init's exports — BOOTCLASSPATH,
+        // ANDROID_*_ROOT, DEX2OATBOOTCLASSPATH, ... — which app_process/ART need), then overlay.
+        for (char** ep = environ; ep && *ep; ++ep) {
+            const char* eq = strchr(*ep, '=');
+            if (!eq) continue;
+            std::string k(*ep, eq - *ep);
+            if (k.rfind("ANDROID_SOCKET_", 0) == 0) continue;  // the daemon's control socket fd is not inherited
+            env[k] = eq + 1;
+        }
         env["HOME"] = "/data/local/tmp";
-        env["PATH"] = "/system/bin:/system/xbin:/vendor/bin";
-        env["ANDROID_ROOT"] = "/system";
-        env["ANDROID_DATA"] = "/data";
-        env["AOHP_ROOTFS"] = rootfs;
+        if (env.find("PATH") == env.end()) env["PATH"] = "/system/bin:/system/xbin:/vendor/bin";
+        env["AOHP_ROOTFS"] = rootfs;  // the env's rootfs is not mounted at /, so point the helper at it
     } else {
         env["HOME"] = "/root";
         env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
