@@ -62,6 +62,11 @@ struct UnitDef {
     double timeoutStopSec = 30.0;
     double timeoutStartSec = 90.0;
     KillMode killMode = KillMode::ControlGroup;
+    // AOHP extension: run on the Android host (no chroot / bind mounts), still in the env's cgroup and
+    // supervised like any unit. For host-side helpers the env needs: the Termux:X11 server, a virgl
+    // proxy, am/pm intents. Paths in ExecStart/WorkingDirectory/EnvironmentFile are host paths; the env's
+    // rootfs is exported as $AOHP_ROOTFS.
+    bool hostExec = false;
 
     // [Timer]
     double onBootSec = -1;

@@ -48,6 +48,13 @@ int main() {
     CHECK(u.environment.size() == 2 && u.environment[1].first == "FOO" && u.environment[1].second == "bar baz");
     CHECK(u.environmentFiles.size() == 1 && u.environmentFiles[0].second == true);
     CHECK(u.workingDirectory == "/root/.openclaw/workspace");
+    CHECK(!u.hostExec);
+    {
+        UnitDef h = parseUnitText("x11.service", "[Service]\nHostExec=yes\nExecStart=/system/bin/app_process / com.termux.x11.CmdEntryPoint :0\n");
+        CHECK(h.loadError.empty() && h.hostExec);
+        UnitDef bad = parseUnitText("x.service", "[Service]\nHostExec=maybe\nExecStart=/bin/true\n");
+        CHECK(!bad.loadError.empty());
+    }
     CHECK(u.execStartPre.size() == 1 && u.execStartPre[0].ignoreFailure);
     CHECK(u.execStart.size() == 1 && u.execStart[0].command == "/usr/local/bin/openclaw gateway");
     CHECK(u.restart == RestartPolicy::OnFailure && u.restartSec == 5);

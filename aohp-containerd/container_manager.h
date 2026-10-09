@@ -26,6 +26,7 @@ struct SpawnSpec {
     std::string workDir = "/";       // path inside the rootfs
     bool workDirOptional = true;     // fall back to / when missing
     std::string logPath;             // host path; stdout+stderr appended (empty = /dev/null)
+    bool host = false;               // HostExec=: no mount ns / bind mounts / chroot; argv+workDir are host paths
 };
 
 struct ExecResult {

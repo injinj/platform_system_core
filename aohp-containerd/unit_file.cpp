@@ -338,7 +338,8 @@ UnitDef parseUnitText(const std::string& name, const std::string& text) {
                 double d;
                 if (!parseDurationSec(value, &d)) err(where + "bad TimeoutSec");
                 else { u.timeoutStopSec = d; u.timeoutStartSec = d; }
-            } else if (key == "KillMode") {
+            } else if (key == "HostExec") { if (!parseBool(value, &u.hostExec)) err(where + "bad boolean"); }
+            else if (key == "KillMode") {
                 std::string l = lower(value);
                 if (l == "control-group" || l == "mixed") u.killMode = KillMode::ControlGroup;
                 else if (l == "process") u.killMode = KillMode::Process;

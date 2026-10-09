@@ -347,17 +347,27 @@ void UnitManager::rotateLog(const std::string& path) {
 
 std::vector<std::string> UnitManager::buildEnv(EnvUnits& e, const UnitState& u, std::vector<std::string>* warnings) {
     std::map<std::string, std::string> env;
-    env["HOME"] = "/root";
-    env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+    std::string rootfs = envDir(e.env) + "/rootfs";
+    if (u.def.hostExec) {
+        // Android host process: the env's rootfs is not mounted at /, so point the helper at it.
+        env["HOME"] = "/data/local/tmp";
+        env["PATH"] = "/system/bin:/system/xbin:/vendor/bin";
+        env["ANDROID_ROOT"] = "/system";
+        env["ANDROID_DATA"] = "/data";
+        env["AOHP_ROOTFS"] = rootfs;
+    } else {
+        env["HOME"] = "/root";
+        env["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+    }
     env["TERM"] = "xterm-256color";
     env["LANG"] = "C.UTF-8";
     env["NODE_NO_WARNINGS"] = "1";
     env["AOHP_ENV"] = e.env;
     env["AOHP_UNIT"] = u.def.name;
-    std::string rootfs = envDir(e.env) + "/rootfs";
     for (const auto& ef : u.def.environmentFiles) {
         bool ok;
-        std::string text = readFileStr(rootfs + ef.first, &ok);
+        // EnvironmentFile= is a path inside the env for normal units, a host path for HostExec= units.
+        std::string text = readFileStr((u.def.hostExec ? std::string() : rootfs) + ef.first, &ok);
         if (!ok) {
             if (!ef.second && warnings) warnings->push_back("EnvironmentFile " + ef.first + " missing");
             continue;
@@ -393,7 +403,8 @@ pid_t UnitManager::spawn(EnvUnits& e, const UnitState& u, const std::string& com
     std::string logPath = unitLogPath(envDir(e.env), u.def.name);
     mkdirP(envDir(e.env) + "/.aohp/log", 0755);
     SpawnSpec spec;
-    spec.argv = {"/bin/sh", "-c", command};
+    spec.host = u.def.hostExec;
+    spec.argv = {spec.host ? "/system/bin/sh" : "/bin/sh", "-c", command};
     spec.env = env;
     spec.workDir = u.def.workingDirectory.empty() ? "/" : u.def.workingDirectory;
     spec.workDirOptional = u.def.workingDirectoryOptional || u.def.workingDirectory.empty();

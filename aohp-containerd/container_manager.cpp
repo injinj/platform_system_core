@@ -1056,14 +1056,18 @@ pid_t ContainerManager::spawnInContainer(const std::string& name, const SpawnSpe
                 closedir(fds);
             }
         }
-        tryUnshareMountNs();
-        if (!setupBindMounts(rootfs)) {
-            const char m = 125;
-            write(syncPipe[1], &m, 1);
-            _exit(125);
+        if (!spec.host) {
+            tryUnshareMountNs();
+            if (!setupBindMounts(rootfs)) {
+                const char m = 125;
+                write(syncPipe[1], &m, 1);
+                _exit(125);
+            }
         }
+        // Host-exec units join the env's cgroup too: stop/KillMode/restart accounting are the same, and the
+        // helper dies with the env.
         mCgroup_.joinContainerCgroup(name, getpid());
-        if (chroot(rootfs.c_str()) != 0) {
+        if (!spec.host && chroot(rootfs.c_str()) != 0) {
             const char m = 126;
             write(syncPipe[1], &m, 1);
             _exit(126);
