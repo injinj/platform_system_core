@@ -8,6 +8,12 @@ on post-fs-data
     mkdir /data/aohp/shared/uda 0770 root system
     restorecon_recursive /data/aohp
 
+# Mountpoint for the per-container POSIX shm tmpfs. Android has no /dev/shm; the container binds the host
+# /dev, so the directory must exist on the host side for containerd to mount a private tmpfs over it
+# (wlroots/phoc, squeekboard, zink, Chromium, JVMs all shm_open).
+on post-fs
+    mkdir /dev/shm 01777 root root
+
 service aohp-containerd /system/bin/aohp-containerd
     class main
     user root

@@ -420,6 +420,7 @@ bool ContainerManager::teardownBindMounts(const std::string& rootfs) {
             "/root/.npm",
             "/proc",
             "/dev/pts",
+            "/dev/shm",
             "/dev",
             "/sys",
             "/sdcard",
@@ -566,6 +567,21 @@ bool ContainerManager::setupBindMounts(const std::string& rootfs) {
     if (!ensureDir(devpts, 0755)) return false;
     if (mount("devpts", devpts.c_str(), "devpts", 0, "newinstance,ptmxmode=0666") != 0) {
         PLOG(WARNING) << "devpts mount failed (PTY in container may not work)";
+    }
+
+    // POSIX shared memory: glibc's shm_open() needs /dev/shm, which Android lacks. The bind of the host
+    // /dev brings in the (empty) /dev/shm directory aohp-containerd.rc creates; give each container its
+    // own private tmpfs there (this mount namespace is a slave, so it never shows on the host). Capped at
+    // a quarter of RAM like Debian's default; files are labelled aohp_container_daemon_tmpfs by the
+    // tmpfs_domain transition, so the Termux:X11 app may map what the env shares with it.
+    std::string devshm = rootfs + "/dev/shm";
+    struct stat shmst;
+    if (stat(devshm.c_str(), &shmst) == 0 && S_ISDIR(shmst.st_mode)) {
+        if (mount("tmpfs", devshm.c_str(), "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777,size=25%") != 0) {
+            PLOG(WARNING) << "tmpfs mount on /dev/shm failed (POSIX shm in container will not work)";
+        }
+    } else {
+        LOG(WARNING) << "no /dev/shm on the host (aohp-containerd.rc should create it); POSIX shm unavailable";
     }
 
     struct stat st;
